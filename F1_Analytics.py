@@ -2,7 +2,7 @@ import requests
 
 def fetch_user_selected_race():
 
-    # 1. Gather inputs from the user
+    # Gather inputs from the user
     # Note: Case sensitivity matters for OpenF1 (e.g., "Belgium", "Race")
     year_input = input("Enter Year (e.g., 2026, 2025): ").strip()
     country_input = input("Enter Country Name (e.g., Belgium, Great Britain, Monaco): ").strip()
@@ -10,7 +10,7 @@ def fetch_user_selected_race():
     
     print("\nSearching OpenF1 database for matching keys...")
     
-    # 2. Query the /sessions endpoint using the user's parameters
+    # Query the /sessions endpoint using the user's parameters
     # This acts like a phone book to find our hidden numeric ID
     lookup_url = f"https://api.openf1.org/v1/sessions?year={year_input}&country_name={country_input}&session_name={session_input}"
     
@@ -34,9 +34,8 @@ def fetch_user_selected_race():
         print(f" Error talking to OpenF1 API: {e}")
         return
 
-    # ==========================================
-    # STEP 3: Fetch Driver Profiles (Names & Teams)
-    # ==========================================
+    
+    # Fetch Driver Profiles (Names & Teams)
     drivers_url = f"https://api.openf1.org/v1/drivers?session_key={session_key}"
     drivers_data = requests.get(drivers_url).json()
     
@@ -47,10 +46,8 @@ def fetch_user_selected_race():
             'acronym': d.get('name_acronym', 'UNK'),
             'team': d.get('team_name', 'Unknown Team')
         }
-    
-    # ==========================================
-    # STEP 4: Get the Standings for that Session
-    # ==========================================
+
+    # Get the Standings for that Session
     results_url = f"https://api.openf1.org/v1/session_result?session_key={session_key}"
     results_data = requests.get(results_url).json()
     
