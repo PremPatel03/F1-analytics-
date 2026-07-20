@@ -7,10 +7,15 @@ app = Flask(__name__)
 
 BASE_URL = "https://api.openf1.org/v1"
 
+# Official FIA F1 Point Distributions
+STANDARD_POINTS = {1: 25, 2: 18, 3: 15, 4: 12, 5: 10, 6: 8, 7: 6, 8: 4, 9: 2, 10: 1}
+SPRINT_POINTS   = {1: 8,  2: 7,  3: 6,  4: 5,  5: 4,  6: 3, 7: 2, 8: 1}
+
 @app.route('/')
 def home():
     return render_template_string(HTML_LAYOUT)
 
+@app.route('/get_race_data', methods=['POST'])
 @app.route('/get_race_data', methods=['POST'])
 def get_race_data():
     user_data = request.json
@@ -50,7 +55,7 @@ def get_race_data():
         if weather_res and isinstance(weather_res, list):
             latest_weather = weather_res[-1]
             is_raining = " Yes" if latest_weather.get('rainfall') == 1 else " No"
-            weather_summary = f" Air Temp: {latest_weather.get('air_temperature')}°C  |   Track Temp: {latest_weather.get('track_temperature')}°C  |   Rainfall: {is_raining}  |   Wind Speed: {latest_weather.get('wind_speed')} m/s"
+            weather_summary = f" Air Temp: {latest_weather.get('air_temperature')}°C  |  Track Temp: {latest_weather.get('track_temperature')}°C  |  Rainfall: {is_raining}  |  Wind Speed: {latest_weather.get('wind_speed')} m/s"
     except Exception:
         pass
 
@@ -80,15 +85,30 @@ def get_race_data():
     except Exception:
         pass
     
-    # 5. Get Standings & Interval Times Safely
+    # 5. Get Standings & Lap Totals
     results_res = []
+    laps_lookup = {}
+    
     try:
         results_res = requests.get(f"{BASE_URL}/session_result?session_key={session_key}").json()
         if not isinstance(results_res, list):
             results_res = []
+            
+        # Fetch total laps per driver from the /laps endpoint
+        laps_res = requests.get(f"{BASE_URL}/laps?session_key={session_key}").json()
+        if isinstance(laps_res, list):
+            for l in laps_res:
+                d_num = l.get('driver_number')
+                l_num = l.get('lap_number')
+                if d_num and l_num:
+                    laps_lookup[d_num] = max(laps_lookup.get(d_num, 0), l_num)
     except Exception:
         pass
-        
+
+    # Identify session point rules
+    is_sprint = "sprint" in actual_session_name.lower() and "shootout" not in actual_session_name.lower()
+    is_race = "race" in actual_session_name.lower() and not is_sprint
+
     output_rows = []
     if not results_res and driver_lookup:
         for num, profile in driver_lookup.items():
@@ -97,7 +117,9 @@ def get_race_data():
                 "acronym": profile['acronym'],
                 "team": profile['team'],
                 "color": f"#{profile['color']}",
+                "laps": "-",
                 "interval": "-",
+                "points": "0",
                 "radio_url": radio_lookup.get(num, None)
             })
     else:
@@ -109,6 +131,9 @@ def get_race_data():
         for i, row in enumerate(sorted_standings):
             driver_num = row.get('driver_number')
             p_val = row.get('position')
+            
+            # Pull completed laps from laps_lookup dictionary
+            laps_val = laps_lookup.get(driver_num, "-")
             profile = driver_lookup.get(driver_num, {'acronym': 'UNK', 'team': 'Unknown Team', 'color': 'FFFFFF'})
             
             if i == 0:
@@ -120,12 +145,23 @@ def get_race_data():
                 else:
                     interval_str = "+0.000s"
             
+            # Points Processor
+            earned_points = 0
+            if p_val is not None and str(p_val).isdigit():
+                pos_int = int(p_val)
+                if is_race:
+                    earned_points = STANDARD_POINTS.get(pos_int, 0)
+                elif is_sprint:
+                    earned_points = SPRINT_POINTS.get(pos_int, 0)
+
             output_rows.append({
                 "position": f"P{p_val}" if p_val is not None else "N/A",
                 "acronym": profile['acronym'],
                 "team": profile['team'],
                 "color": f"#{profile['color']}",
+                "laps": laps_val,
                 "interval": interval_str,
+                "points": str(earned_points) if earned_points > 0 else "-",
                 "radio_url": radio_lookup.get(driver_num, None)
             })
         
@@ -173,11 +209,13 @@ HTML_LAYOUT = """
         th { color: #555; text-transform: uppercase; font-size: 11px; font-weight: bold; letter-spacing: 0.5px; background: #1a1b1e; }
         
         /* Allocated Column Adjustments preventing compression clip points */
-        th:nth-child(1), td:nth-child(1) { width: 90px; font-size: 15px; } /* Expanded Position lane */
-        th:nth-child(2), td:nth-child(2) { width: 100px; } /* Driver Acronym */
-        th:nth-child(3), td:nth-child(3) { width: 35%; }   /* Team stretch allocation */
-        th:nth-child(4), td:nth-child(4) { width: 15%; }   /* Interval data text column */
-        th:nth-child(5), td:nth-child(5) { width: 180px; }  /* Native audio layout space */
+       th:nth-child(1), td:nth-child(1) { width: 90px; font-size: 15px; } 
+        th:nth-child(2), td:nth-child(2) { width: 100px; }                 
+        th:nth-child(3), td:nth-child(3) { width: 28%; }                   
+        th:nth-child(4), td:nth-child(4) { width: 95px; text-align: center; }
+        th:nth-child(5), td:nth-child(5) { width: 15%; }                   
+        th:nth-child(6), td:nth-child(6) { width: 85px; text-align: center; }
+        th:nth-child(7), td:nth-child(7) { width: 160px; }
 
         tr:hover { background: #22242a; }
         
@@ -199,7 +237,12 @@ HTML_LAYOUT = """
     <header>
         <h1><span>F1</span> Analytics</h1>
         <div class="search-box">
-            <select id="year"></select>
+            <select id="year">
+                <option value="2026">2026</option>
+                <option value="2025">2025</option>
+                <option value="2024">2024</option>
+                <option value="2023" selected>2023</option>
+            </select>
             <select id="country">
                 <option value="Abu Dhabi">Abu Dhabi</option>
                 <option value="Australia">Australia</option>
@@ -245,15 +288,23 @@ HTML_LAYOUT = """
             <div id="weatherContainer" class="weather-banner" style="display: none;"></div>
         </div>
         
-        <!-- SECTION 1: FULL SCREEN WIDTH LEADERBOARD -->
+        <FULL SCREEN WIDTH LEADERBOARD
         <div class="section-wrapper">
             <div class="section-title">Official Session Leaderboard</div>
             <table>
                 <thead>
-                    <tr><th>Position</th><th>Driver</th><th>Constructor Team</th><th>Interval Gap</th><th> Team Radio Feed</th></tr>
+                    <tr>
+                        <th>Position</th>
+                        <th>Driver</th>
+                        <th>Constructor Team</th>
+                        <th style="text-align: center;">Laps</th>
+                        <th>Interval Gap</th>
+                        <th style="text-align: center;">Pts</th>
+                        <th> Team Radio Feed</th>
+                    </tr>
                 </thead>
                 <tbody id="resultsTableBody">
-                    <tr><td colspan="5" style="text-align:center; color:#555; padding: 60px;">Select filters above and hit search to load data rows.</td></tr>
+                    <tr><td colspan="7" style="text-align:center; color:#555; padding: 60px;">Select filters above and hit search to load data rows.</td></tr>
                 </tbody>
             </table>
         </div>
@@ -283,22 +334,12 @@ HTML_LAYOUT = """
 
     <script>
         window.addEventListener('DOMContentLoaded', () => {
-            const yearSelect = document.getElementById('year');
-            const startYear = 2023;
-            const currentYear = 2026; 
-
-            for (let year = currentYear; year >= startYear; year--) {
-                const option = document.createElement('option');
-                option.value = year;
-                option.innerText = year;
-                if (year === 2023) option.selected = true;
-                yearSelect.appendChild(option);
-            }
+            // Dropdown options are handled directly in HTML
         });
 
         function searchRace() {
             const tableBody = document.getElementById('resultsTableBody');
-            tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#888; padding: 60px;">⏳ Accessing OpenF1 active data stream arrays...</td></tr>`;
+            tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#888; padding: 60px;"> Loading F1 Data...</td></tr>`;
 
             const payload = {
                 year: document.getElementById('year').value,
@@ -315,7 +356,7 @@ HTML_LAYOUT = """
             .then(data => {
                 if(data.error) {
                     alert(data.error);
-                    tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#e10600; padding: 60px;"> Error: ${data.error}</td></tr>`;
+                    tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#e10600; padding: 60px;"> Error: ${data.error}</td></tr>`;
                     return;
                 }
                 
@@ -333,6 +374,10 @@ HTML_LAYOUT = """
                         ? `<audio controls src="${driver.radio_url}"></audio>` 
                         : `<span style="color:#444; font-size:11px;">No Audio</span>`;
 
+                    const ptsDisplay = driver.points !== "-" 
+                        ? `<b style="color:#fff; font-size:14px;">${driver.points}</b>` 
+                        : `<span style="color:#444;">0</span>`;
+
                     const row = `<tr>
                         <td><b style="color:#fff;">${driver.position}</b></td>
                         <td><b style="color:#fff; background:#22252c; padding:4px 8px; border-radius:4px;">${driver.acronym}</b></td>
@@ -341,7 +386,9 @@ HTML_LAYOUT = """
                                 <span class="team-badge" style="border-color: ${driver.color}; color:#aaa;">${driver.team}</span>
                             </div>
                         </td>
+                        <td style="text-align: center; font-weight: 500; color: #fff;">${driver.laps}</td>
                         <td style="color:#00E1D9; font-weight:600; font-size:13px; letter-spacing:0.5px;">${driver.interval}</td>
+                        <td style="text-align: center;">${ptsDisplay}</td>
                         <td>${radioCell}</td>
                     </tr>`;
                     tableBody.innerHTML += row;
@@ -349,10 +396,11 @@ HTML_LAYOUT = """
             })
             .catch(err => {
                 alert("An error occurred while communicating with the data server.");
-                tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#e10600; padding: 60px;"> Connection Failed</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#e10600; padding: 60px;">❌ Connection Failed</td></tr>`;
             });
         }
     </script>
+
 </body>
 </html>
 """
