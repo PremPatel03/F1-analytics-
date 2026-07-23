@@ -16,7 +16,6 @@ def home():
     return render_template_string(HTML_LAYOUT)
 
 @app.route('/get_race_data', methods=['POST'])
-@app.route('/get_race_data', methods=['POST'])
 def get_race_data():
     user_data = request.json
     year = user_data.get('year')
@@ -172,6 +171,38 @@ def get_race_data():
         "weather": weather_summary,
         "results": output_rows
     })
+
+@app.route('/get_telemetry', methods=['POST'])
+def get_telemetry():
+    req = request.json
+    session_key = req.get('session_key')
+    driver_numbers = req.get('driver_numbers', [])
+
+    if not session_key or not driver_numbers:
+        return jsonify({"error": "Missing session_key or selected drivers"}), 400
+
+    telemetry_data = {}
+
+    # Limit to max 3 drivers at a time so API response is fast
+    for d_num in driver_numbers[:3]:
+        try:
+            # Query car_data for this driver
+            url = f"{BASE_URL}/car_data?session_key={session_key}&driver_number={d_num}"
+            car_res = requests.get(url).json()
+
+            if isinstance(car_res, list) and len(car_res) > 0:
+                # Downsample data (take every 5th point) to keep the browser running smooth
+                sampled = car_res[::5]
+                speeds = [item.get('speed', 0) for item in sampled]
+
+                telemetry_data[d_num] = {
+                    "speeds": speeds,
+                    "sample_count": len(speeds)
+                }
+        except Exception:
+            continue
+
+    return jsonify({"telemetry": telemetry_data})
 
 SEASON_2026_LAYOUT = """
 <!DOCTYPE html>
@@ -384,6 +415,7 @@ HTML_LAYOUT = """
 <!DOCTYPE html>
 <html>
 <head>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <title>F1 Analytics</title>
     <style>
         * { box-sizing: border-box; }
@@ -592,14 +624,22 @@ HTML_LAYOUT = """
 
         <!-- SECTION 2: DOWNWARD SCROLL ANALYTICS GRID CONTENT PLACEHOLDERS -->
         <div class="analytics-grid">
-            <div class="section-wrapper" style="padding:0; border:none; background:none;">
-                <div class="section-title" style="margin-bottom:15px;">Telemetry Data</div>
-                <div class="placeholder-card">
-                    <span></span>
-                    <b>Car Telemetry Data </b>
-                    <p style="margin: 5px 0 0 0; font-size:12px; max-width:280px; color:#666;">This canvas zone is reserved for plotting Speed vs Throttle curves matching selected drivers.</p>
-                </div>
-            </div>
+            <div class="section-wrapper">
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>📈 Speed Telemetry Overlay</span>
+        <span id="telemetryStatus" style="font-size:11px; color:#888; text-transform:none;">Select drivers after searching</span>
+    </div>
+
+    <!-- DRIVER SELECTION AREA -->
+    <div id="driverPillsContainer" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:15px;">
+        <span style="color:#666; font-size:12px;">No driver telemetry available yet. Search a race first!</span>
+    </div>
+
+    <!-- CANVAS CHART -->
+    <div style="position: relative; height: 320px; width: 100%;">
+        <canvas id="telemetryChart"></canvas>
+    </div>
+</div>
 
             <div class="section-wrapper" style="padding:0; border:none; background:none;">
                 <div class="section-title" style="margin-bottom:15px;">Live Track Map </div>
@@ -614,13 +654,16 @@ HTML_LAYOUT = """
     </div>
 
     <script>
-        window.addEventListener('DOMContentLoaded', () => {
-            // Dropdown options are handled directly in HTML
-        });
+        let currentSessionKey = null;
+        let driverColorMap = {};
+        let selectedDrivers = new Set();
+        let chartInstance = null;
+
+        window.addEventListener('DOMContentLoaded', () => {});
 
         function searchRace() {
             const tableBody = document.getElementById('resultsTableBody');
-            tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#888; padding: 60px;"> Loading F1 Data...</td></tr>`;
+            tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#888; padding: 60px;">⏳ Accessing OpenF1 telemetry data streams...</td></tr>`;
 
             const payload = {
                 year: document.getElementById('year').value,
@@ -637,7 +680,7 @@ HTML_LAYOUT = """
             .then(data => {
                 if(data.error) {
                     alert(data.error);
-                    tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#e10600; padding: 60px;"> Error: ${data.error}</td></tr>`;
+                    tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#e10600; padding: 60px;">❌ Error: ${data.error}</td></tr>`;
                     return;
                 }
 
@@ -649,8 +692,18 @@ HTML_LAYOUT = """
                 weatherBanner.style.display = 'block';
 
                 tableBody.innerHTML = "";
+                driverColorMap = {};
+                selectedDrivers.clear();
+
+                const pillsContainer = document.getElementById('driverPillsContainer');
+                pillsContainer.innerHTML = "";
 
                 data.results.forEach(driver => {
+                    // Extract driver number from row or profile map
+                    const dNum = driver.driver_number || driver.acronym;
+                    driverColorMap[driver.acronym] = { color: driver.color, num: dNum };
+
+                    // Render Table Row
                     const radioCell = driver.radio_url
                         ? `<audio controls src="${driver.radio_url}"></audio>`
                         : `<span style="color:#444; font-size:11px;">No Audio</span>`;
@@ -673,11 +726,117 @@ HTML_LAYOUT = """
                         <td>${radioCell}</td>
                     </tr>`;
                     tableBody.innerHTML += row;
+
+                    // Render Interactive Driver Pill
+                    const pill = document.createElement('button');
+                    pill.style.cssText = `background:#22252c; color:#888; border:1px solid #333; padding:4px 10px; border-radius:15px; font-size:11px; font-weight:bold; cursor:pointer; transition:0.2s;`;
+                    pill.innerText = driver.acronym;
+                    pill.onclick = () => toggleDriverTelemetry(driver.acronym, dNum, pill, driver.color);
+                    pillsContainer.appendChild(pill);
                 });
+
+                // Store current session key from backend response (Pass session_key in get_race_data return)
+                currentSessionKey = data.session_key;
+                initChart();
             })
             .catch(err => {
-                alert("An error occurred while communicating with the data server.");
-                tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#e10600; padding: 60px;"> Connection Failed</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#e10600; padding: 60px;">❌ Connection Failed</td></tr>`;
+            });
+        }
+
+        function toggleDriverTelemetry(acronym, dNum, pillElement, teamColor) {
+            if (!currentSessionKey) return;
+
+            if (selectedDrivers.has(dNum)) {
+                selectedDrivers.delete(dNum);
+                pillElement.style.background = "#22252c";
+                pillElement.style.color = "#888";
+                pillElement.style.borderColor = "#333";
+            } else {
+                if (selectedDrivers.size >= 3) {
+                    alert("You can compare up to 3 drivers simultaneously.");
+                    return;
+                }
+                selectedDrivers.add(dNum);
+                pillElement.style.background = teamColor;
+                pillElement.style.color = "#fff";
+                pillElement.style.borderColor = teamColor;
+            }
+
+            fetchTelemetryData();
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('telemetryChart').getContext('2d');
+            if (chartInstance) chartInstance.destroy();
+
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { display: false },
+                        y: {
+                            grid: { color: '#2a2d34' },
+                            ticks: { color: '#888', font: { size: 10 } },
+                            title: { display: true, text: 'Speed (km/h)', color: '#666', font: { size: 11 } }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#fff', font: { weight: 'bold' } } }
+                    }
+                }
+            });
+        }
+
+        function fetchTelemetryData() {
+            if (selectedDrivers.size === 0) {
+                initChart();
+                return;
+            }
+
+            document.getElementById('telemetryStatus').innerText = "⏳ Fetching car_data telemetry...";
+
+            fetch('/get_telemetry', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_key: currentSessionKey,
+                    driver_numbers: Array.from(selectedDrivers)
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('telemetryStatus').innerText = "Live Telemetry Loaded";
+
+                const datasets = [];
+                let maxSamples = 0;
+
+                Object.keys(data.telemetry).forEach(dNum => {
+                    const t = data.telemetry[dNum];
+                    if (t.sample_count > maxSamples) maxSamples = t.sample_count;
+
+                    // Match driver color
+                    let dColor = '#00E1D9';
+                    Object.values(driverColorMap).forEach(info => {
+                        if (info.num == dNum) dColor = info.color;
+                    });
+
+                    datasets.push({
+                        label: `Driver #${dNum}`,
+                        data: t.speeds,
+                        borderColor: dColor,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2
+                    });
+                });
+
+                chartInstance.data.labels = Array.from({ length: maxSamples }, (_, i) => i);
+                chartInstance.data.datasets = datasets;
+                chartInstance.update();
             });
         }
     </script>
